@@ -2,9 +2,10 @@ package process
 
 import (
 	"errors"
+	"io"
+
 	"github.com/loggie-io/loggie/pkg/core/log"
 	"github.com/loggie-io/loggie/pkg/source/file"
-	"io"
 )
 
 func init() {

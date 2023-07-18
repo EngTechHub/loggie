@@ -3,6 +3,7 @@ package process
 import (
 	"time"
 
+	"github.com/loggie-io/loggie/pkg/core/log"
 	"github.com/loggie-io/loggie/pkg/source/file"
 )
 
@@ -57,6 +58,8 @@ func (bp *LoopProcessor) Process(processorChain file.ProcessChain, ctx *file.Job
 			}
 		}
 	}
+	log.Info("!!DEBUG: filename=%s: loop breaks with EOF=%v, continueRead=%d, duration=%v, wasSend=%v, lastOffset=%d",
+		ctx.Filename, ctx.IsEOF, bp.continueRead, time.Since(bp.startReadTime), ctx.WasSend, ctx.LastOffset)
 
 	// send event, reset job eof count
 	if ctx.WasSend {

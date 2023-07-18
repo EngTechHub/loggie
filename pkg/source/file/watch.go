@@ -18,7 +18,6 @@ package file
 
 import (
 	"fmt"
-	"github.com/loggie-io/loggie/pkg/util/persistence/reg"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,6 +29,7 @@ import (
 	"github.com/loggie-io/loggie/pkg/eventbus"
 	"github.com/loggie-io/loggie/pkg/util"
 	"github.com/loggie-io/loggie/pkg/util/persistence"
+	"github.com/loggie-io/loggie/pkg/util/persistence/reg"
 )
 
 const (
@@ -191,11 +191,15 @@ func (w *Watcher) DecideJob(job *Job) {
 	// Stopped jobs are directly put into the zombie queue for release
 	if job.IsStop() {
 		w.zombieJobChan <- job
+		log.Info("!!DEBUG: job is sent to zombieJobChan due to stopped: filename=%s, endOffset=%d",
+			job.FileName(), job.endOffset)
 		return
 	}
 	// inactive
 	if job.EofCount > w.config.MaxEofCount {
 		w.zombieJobChan <- job
+		log.Info("!!DEBUG: job is sent to zombieJobChan due to maxEofCount reached: filename=%s, endOffset=%d",
+			job.FileName(), job.endOffset)
 		return
 	}
 	// w.activeChan <- job
@@ -714,11 +718,18 @@ func (w *Watcher) run() {
 		case watchTaskEvent := <-w.watchTaskEventChan:
 			w.handleWatchTaskEvent(watchTaskEvent)
 		case job := <-w.zombieJobChan:
+			// Consume all items in zombieJobChan at once.
+			// decideZombieJob is assumed to be lightweight enough that all items can be consumed immediately.
 			w.decideZombieJob(job)
+			left := len(w.zombieJobChan)
+			for i := 0; i < left; i++ {
+				w.decideZombieJob(<-w.zombieJobChan)
+			}
 		case e := <-osEvents:
 			// log.Info("os event: %v", e)
 			w.osNotify(e)
 		case <-scanFileTicker.C:
+			log.Info("!!DEBUG: zomebieJobChan len: %d", len(w.zombieJobChan))
 			w.scan()
 		case <-maintenanceTicker.C:
 			w.maintenance()
@@ -796,9 +807,11 @@ func (w *Watcher) asyncStopTaskJobs(watchTask *WatchTask) {
 	}
 }
 
+// decideZombieJob must be as lightweight as possible.
 func (w *Watcher) decideZombieJob(job *Job) {
 	watchJobId := job.WatchUid()
 	if !w.isZombieJob(job) {
+		log.Info("!!DEBUG: job is added to zombieJobs and os notify: filename=%s, endOffset=%d", job.FileName(), job.endOffset)
 		w.zombieJobs[watchJobId] = job
 		w.addOsNotify(job.filename)
 	}

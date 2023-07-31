@@ -47,6 +47,7 @@ func (sp *SourceProcessor) Process(processorChain file.ProcessChain, ctx *file.J
 	read := int64(l)
 	ctx.ReadBuffer = ctx.ReadBuffer[:read]
 
+	log.Info("!!DEBUG: filename=%s: read %d bytes ", ctx.Filename, read)
 	// see lineProcessor.Process
 	processorChain.Process(ctx)
 }

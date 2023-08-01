@@ -45,6 +45,7 @@ type CollectConfig struct {
 	RereadTruncated          bool               `yaml:"rereadTruncated,omitempty" default:"true"`                           // Read from the beginning when the file is truncated
 	FirstNBytesForIdentifier int                `yaml:"firstNBytesForIdentifier,omitempty" default:"128" validate:"gte=10"` // If the file size is smaller than `firstNBytesForIdentifier`, it will not be collected
 	AddonMeta                bool               `yaml:"addonMeta,omitempty"`
+	AddonMetaSchema          AddonMetaSchema    `yaml:"addonMetaSchema,omitempty"`
 	excludeFilePatterns      []*regexp.Regexp
 	Charset                  string `yaml:"charset,omitempty" default:"utf-8"`
 
@@ -52,6 +53,12 @@ type CollectConfig struct {
 	CleanFiles                *CleanFiles   `yaml:"cleanFiles,omitempty"`
 	FdHoldTimeoutWhenInactive time.Duration `yaml:"fdHoldTimeoutWhenInactive,omitempty" default:"5m"`
 	FdHoldTimeoutWhenRemove   time.Duration `yaml:"fdHoldTimeoutWhenRemove,omitempty" default:"5m"`
+}
+
+type AddonMetaSchema struct {
+	Fields          map[string]string `yaml:"fields,omitempty"`
+	FieldsUnderRoot bool              `yaml:"underRoot,omitempty"`
+	FieldsUnderKey  string            `yaml:"key,omitempty" default:"state"`
 }
 
 type LineDelimiterValue struct {
@@ -89,13 +96,13 @@ type WatchConfig struct {
 	EnableOsWatch             bool          `yaml:"enableOsWatch,omitempty" default:"true"`
 	ScanTimeInterval          time.Duration `yaml:"scanTimeInterval,omitempty" default:"10s"`
 	MaintenanceInterval       time.Duration `yaml:"maintenanceInterval,omitempty" default:"5m"`
-	CleanFiles                *CleanFiles   `yaml:"cleanFiles,omitempty"`                             // deprecated
-	FdHoldTimeoutWhenInactive time.Duration `yaml:"fdHoldTimeoutWhenInactive,omitempty" default:"5m"` // deprecated
-	FdHoldTimeoutWhenRemove   time.Duration `yaml:"fdHoldTimeoutWhenRemove,omitempty" default:"5m"`   // deprecated
+	CleanFiles                *CleanFiles   `yaml:"cleanFiles,omitempty"`                             // deprecated, moved to CollectConfig
+	FdHoldTimeoutWhenInactive time.Duration `yaml:"fdHoldTimeoutWhenInactive,omitempty" default:"5m"` // deprecated, moved to CollectConfig
+	FdHoldTimeoutWhenRemove   time.Duration `yaml:"fdHoldTimeoutWhenRemove,omitempty" default:"5m"`   // deprecated, moved to CollectConfig
 	MaxOpenFds                int           `yaml:"maxOpenFds,omitempty" default:"4096"`
 	MaxEofCount               int           `yaml:"maxEofCount,omitempty" default:"3"`
 	CleanWhenRemoved          bool          `yaml:"cleanWhenRemoved,omitempty" default:"true"`
-	ReadFromTail              bool          `yaml:"readFromTail,omitempty" default:"false"` // deprecated
+	ReadFromTail              bool          `yaml:"readFromTail,omitempty" default:"false"` // deprecated, moved to CollectConfig
 	TaskStopTimeout           time.Duration `yaml:"taskStopTimeout,omitempty" default:"30s"`
 	CleanDataTimeout          time.Duration `yaml:"cleanDataTimeout,omitempty" default:"5s"`
 }
@@ -127,6 +134,22 @@ type MultiConfig struct {
 	MaxLines int           `yaml:"maxLines,omitempty" default:"500"`
 	MaxBytes int64         `yaml:"maxBytes,omitempty" default:"131072"` // default 128KB
 	Timeout  time.Duration `yaml:"timeout,omitempty" default:"5s"`      // default 2 * read.timeout
+}
+
+func (c *Config) SetDefaults() {
+	// for config compatibility
+	if c.WatchConfig.CleanFiles != nil {
+		c.CollectConfig.CleanFiles = c.WatchConfig.CleanFiles
+	}
+	if c.WatchConfig.FdHoldTimeoutWhenInactive > 0 {
+		c.CollectConfig.FdHoldTimeoutWhenInactive = c.WatchConfig.FdHoldTimeoutWhenInactive
+	}
+	if c.WatchConfig.FdHoldTimeoutWhenRemove > 0 {
+		c.CollectConfig.FdHoldTimeoutWhenRemove = c.WatchConfig.FdHoldTimeoutWhenRemove
+	}
+	if c.WatchConfig.ReadFromTail {
+		c.CollectConfig.ReadFromTail = c.WatchConfig.ReadFromTail
+	}
 }
 
 func (c *Config) Validate() error {

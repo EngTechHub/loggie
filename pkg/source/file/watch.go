@@ -45,6 +45,7 @@ type jobEvent struct {
 	opt         Operation
 	job         *Job
 	newFilename string
+	newFileSize int64
 }
 
 type Watcher struct {
@@ -216,11 +217,10 @@ func (w *Watcher) reportMetric(job *Job) {
 			PipelineName: job.task.pipelineName,
 			SourceName:   job.task.sourceName,
 		},
-		FileName:   job.filename,
-		Offset:     job.endOffset,
-		LineNumber: job.currentLineNumber,
-		Lines:      job.currentLines,
-		// FileSize:   fileSize,
+		FileName:     job.filename,
+		Offset:       job.endOffset,
+		LineNumber:   job.currentLineNumber,
+		Lines:        job.currentLines,
 		SourceFields: job.task.sourceFields,
 	}
 	job.currentLines = 0
@@ -253,23 +253,47 @@ func (w *Watcher) eventBus(e jobEvent) {
 		}
 		// only care about zombie job write event
 		watchJobId := job.WatchUid()
-		if existJob, ok := w.zombieJobs[watchJobId]; ok {
-			err, fdOpen := existJob.Active()
-			if fdOpen {
-				w.currentOpenFds++
-			}
-			if err != nil {
-				log.Error("active job fileName(%s) fail: %s", filename, err)
-				if existJob.Release() {
-					w.currentOpenFds--
+		existJob, ok := w.zombieJobs[watchJobId]
+		if !ok {
+			return
+		}
+
+		// check whether the file size is less than the offset in the job
+		filesize := e.newFileSize
+		currentOffset := job.endOffset
+		if filesize < currentOffset {
+			// maybe the file is truncated
+			log.Info("filesize: %d, currentOffset: %d", filesize, currentOffset)
+			existRegistry := w.findExistJobRegistry(job)
+			existAckOffset := existRegistry.Offset
+			if existAckOffset > filesize+int64(len(job.GetEncodeLineEnd())) {
+				log.Warn("the job(jobUid:%s) fileName(%s) existRegistry(%+v) ackOffset is larger than file size(%d), the file was truncate", job.Uid(), filename, existRegistry, filesize)
+				// file was truncated, need to reinitialize the job
+				job.Delete()
+				if w.isZombieJob(job) {
+					w.finalizeJob(job)
 				}
 				return
 			}
-			existJob.Read()
-			// zombie job change to active, so without os notify
-			w.removeOsNotify(existJob.filename)
-			delete(w.zombieJobs, watchJobId)
 		}
+
+		err, fdOpen := existJob.Active()
+		if fdOpen {
+			w.currentOpenFds++
+		}
+		if err != nil {
+			log.Error("active job fileName(%s) fail: %s", filename, err)
+			if existJob.Release() {
+				w.currentOpenFds--
+			}
+			return
+		}
+		existJob.Read()
+		// zombie job change to active, so without os notify
+		w.removeOsNotify(existJob.filename)
+		log.Debug("job fileName(%s) change to active", filename)
+		delete(w.zombieJobs, watchJobId)
+
 	case CREATE:
 		if w.currentOpenFds >= w.config.MaxOpenFds {
 			log.Error("maxCollectFiles reached. fileName(%s) will be ignore", filename)
@@ -300,9 +324,6 @@ func (w *Watcher) eventBus(e jobEvent) {
 		// Pre-allocation offset
 		if existAckOffset == 0 {
 			if e.job.task.config.ReadFromTail {
-				existAckOffset = fileSize
-			} else if w.config.ReadFromTail {
-				// readFromTail is deprecated in watcher, keep it only for compatibility with older versions
 				existAckOffset = fileSize
 			}
 			w.preAllocationOffset(existAckOffset, job)
@@ -546,15 +567,15 @@ func (w *Watcher) scanActiveJob() {
 			continue
 		}
 		// check FdHoldTimeoutWhenRemove
-		if job.IsDeleteTimeout(job.task.config.FdHoldTimeoutWhenRemove) || job.IsDeleteTimeout(w.config.FdHoldTimeoutWhenRemove) {
+		if job.IsDeleteTimeout(job.task.config.FdHoldTimeoutWhenRemove) {
 			job.Stop()
 			log.Info("[pipeline(%s)-source(%s)]: job stop because file(%s) fdHoldTimeoutWhenRemove(%d second) reached", job.task.pipelineName, job.task.sourceName, job.filename, job.task.config.FdHoldTimeoutWhenRemove/time.Second)
 			continue
 		}
 		// check FdHoldTimeoutWhenInactive
-		if time.Since(job.LastActiveTime()) > job.task.config.FdHoldTimeoutWhenInactive || time.Since(job.LastActiveTime()) > w.config.FdHoldTimeoutWhenInactive {
+		if time.Since(job.LastActiveTime()) > job.task.config.FdHoldTimeoutWhenInactive {
 			job.Stop()
-			log.Info("[pipeline(%s)-source(%s)]: job stop because file(%s) fdHoldTimeoutWhenInactive(%d second) reached", job.task.pipelineName, job.task.sourceName, job.filename, w.config.FdHoldTimeoutWhenInactive/time.Second)
+			log.Info("[pipeline(%s)-source(%s)]: job stop because file(%s) fdHoldTimeoutWhenInactive(%d second) reached", job.task.pipelineName, job.task.sourceName, job.filename, job.task.config.FdHoldTimeoutWhenInactive/time.Second)
 			// more aggressive releasing of fd to prevent excessive memory usage
 			if job.Release() {
 				w.currentOpenFds--
@@ -564,12 +585,7 @@ func (w *Watcher) scanActiveJob() {
 	}
 }
 
-// check zombie job:
-//  0. final status
-//  1. remove
-//  2. fd hold timeout,release fd
-//  3. write
-//  4. truncated file
+// check zombie job
 func (w *Watcher) scanZombieJob() {
 	for _, job := range w.zombieJobs {
 		if job.IsDelete() {
@@ -578,8 +594,6 @@ func (w *Watcher) scanZombieJob() {
 		}
 		filename := job.filename
 		stat, err := os.Stat(filename)
-		//var stat os.FileInfo
-		//var err error
 		var checkRemove = func() bool {
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -628,15 +642,16 @@ func (w *Watcher) scanZombieJob() {
 					job.nextOffset = 0
 					job.currentLineNumber = 0
 					w.eventBus(jobEvent{
-						opt: WRITE,
-						job: job,
+						opt:         WRITE,
+						job:         job,
+						newFileSize: size,
 					})
 					continue
 				}
 			}
 		} else {
 			// release fd
-			if time.Since(job.LastActiveTime()) > job.task.config.FdHoldTimeoutWhenInactive || time.Since(job.LastActiveTime()) > w.config.FdHoldTimeoutWhenInactive {
+			if time.Since(job.LastActiveTime()) > job.task.config.FdHoldTimeoutWhenInactive {
 				if job.Release() {
 					w.currentOpenFds--
 				}
@@ -655,8 +670,9 @@ func (w *Watcher) scanZombieJob() {
 		size := stat.Size()
 		if size > job.nextOffset && !job.task.config.IsIgnoreOlder(stat) {
 			w.eventBus(jobEvent{
-				opt: WRITE,
-				job: job,
+				opt:         WRITE,
+				job:         job,
+				newFileSize: size,
 			})
 			continue
 		}
@@ -726,7 +742,6 @@ func (w *Watcher) run() {
 				w.decideZombieJob(<-w.zombieJobChan)
 			}
 		case e := <-osEvents:
-			// log.Info("os event: %v", e)
 			w.osNotify(e)
 		case <-scanFileTicker.C:
 			log.Info("!!DEBUG: zomebieJobChan len: %d", len(w.zombieJobChan))
@@ -818,7 +833,6 @@ func (w *Watcher) decideZombieJob(job *Job) {
 }
 
 func (w *Watcher) osNotify(e fsnotify.Event) {
-	log.Debug("received os notify: %+v", e)
 	if e.Op == fsnotify.Chmod {
 		// File writing will also be received. Ignore it. Only check whether you have read permission when the file job is activated (job. Active())
 		return
@@ -835,6 +849,7 @@ func (w *Watcher) osNotify(e fsnotify.Event) {
 	if e.Op == fsnotify.Rename {
 		return
 	}
+	log.Debug("received os notify: %+v", e)
 
 	fileName := e.Name
 	if ignoreSystemFile(fileName) {
@@ -872,8 +887,9 @@ func (w *Watcher) osNotify(e fsnotify.Event) {
 		for _, existJob := range w.allJobs {
 			if existJob.Uid() == jobUid {
 				w.eventBus(jobEvent{
-					opt: WRITE,
-					job: existJob,
+					opt:         WRITE,
+					job:         existJob,
+					newFileSize: stat.Size(),
 				})
 			}
 		}
@@ -1006,14 +1022,11 @@ func (w *Watcher) cleanFiles(watchTask *WatchTask, infos []eventbus.FileInfo) []
 	if watchTask == nil {
 		return nil
 	}
-	if w.config.CleanFiles == nil && watchTask.config.CleanFiles == nil {
+	if watchTask.config.CleanFiles == nil {
 		return nil
 	}
 
 	var maxHistoryDays int
-	if w.config.CleanFiles != nil {
-		maxHistoryDays = w.config.CleanFiles.MaxHistoryDays
-	}
 	if watchTask.config.CleanFiles != nil {
 		maxHistoryDays = watchTask.config.CleanFiles.MaxHistoryDays
 	}
@@ -1032,8 +1045,10 @@ func (w *Watcher) cleanFiles(watchTask *WatchTask, infos []eventbus.FileInfo) []
 			}
 
 			// if file is not finished, do not remove it
-			if !watchTask.config.CleanFiles.CleanUnfinished && info.Offset < info.Size {
-				continue
+			if watchTask.config.CleanFiles != nil {
+				if !watchTask.config.CleanFiles.CleanUnfinished && info.Offset < info.Size {
+					continue
+				}
 			}
 
 			_ = truncateAndRemoveFile(info.FileName)
@@ -1097,7 +1112,7 @@ func (w *Watcher) handleRemoveJobs(jobs ...*Job) {
 			JobUid:       jt.Uid(),
 			Filename:     jt.filename,
 		}
-		log.Info("try to delete registry(%+v) because CleanWhenRemoved. deleteTime: %s", r, jt.deleteTime.Load().(time.Time).Format(persistence.TimeFormatPattern))
+		log.Info("try to delete registry(%+v). deleteTime: %s", r, jt.deleteTime.Load().(time.Time).Format(persistence.TimeFormatPattern))
 		w.dbHandler.HandleOpt(persistence.DbOpt{
 			R:           r,
 			OptType:     persistence.DeleteByJobUidOpt,

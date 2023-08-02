@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/loggie-io/loggie/pkg/core/log"
 	"github.com/loggie-io/loggie/pkg/util"
 	"github.com/loggie-io/loggie/pkg/util/persistence"
@@ -41,6 +43,36 @@ const (
 var NilOfTime, _ = time.ParseInLocation("2006-01-02 15:04:05", "2008-08-08 08:08:08", time.Local)
 
 var globalJobIndex uint32
+
+var productFuncLatency = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    "loggie_debug_job_product_func_latency",
+		Help:    "ProductFunc latency in seconds",
+		Buckets: prometheus.ExponentialBuckets(0.001, 4, 10),
+	}, []string{"filename"},
+)
+
+var getFromEventPoolLatency = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    "loggie_debug_job_get_from_event_pool_latency",
+		Help:    "Get from event pool latency in seconds",
+		Buckets: prometheus.ExponentialBuckets(0.001, 4, 10),
+	}, []string{"filename"},
+)
+
+var productEventLatency = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    "loggie_debug_job_product_event_latency",
+		Help:    "ProductEvent latency in seconds",
+		Buckets: prometheus.ExponentialBuckets(0.001, 4, 10),
+	}, []string{"filename"},
+)
+
+func init() {
+	prometheus.MustRegister(productFuncLatency)
+	prometheus.MustRegister(getFromEventPoolLatency)
+	prometheus.MustRegister(productEventLatency)
+}
 
 type JobStatus int
 
@@ -326,6 +358,11 @@ func (j *Job) ProductEvent(endOffset int64, collectTime time.Time, body []byte) 
 	contentBytes := int64(len(body))
 	// -1 because `\n`
 	startOffset := nextOffset - contentBytes - int64(len(j.GetEncodeLineEnd()))
+	defer func(start time.Time) {
+		productEventLatency.With(prometheus.Labels{
+			"filename": j.FileName(),
+		}).Observe(time.Since(start).Seconds())
+	}(time.Now())
 
 	j.currentLineNumber++
 	j.currentLines++
@@ -355,13 +392,21 @@ func (j *Job) ProductEvent(endOffset int64, collectTime time.Time, body []byte) 
 		EventUid:     eventUid.String(),
 		JobFields:    j.jobFields,
 	}
+	startAt := time.Now()
 	e := j.task.eventPool.Get()
+	getFromEventPoolLatency.With(prometheus.Labels{
+		"filename": j.FileName(),
+	}).Observe(time.Since(startAt).Seconds())
 	e.Meta().Set(SystemStateKey, state)
 	// copy body,because readBuffer reuse
 	contentBuffer := make([]byte, contentBytes)
 	copy(contentBuffer, body)
 	e.Fill(e.Meta(), e.Header(), contentBuffer)
+	startAt = time.Now()
 	j.task.productFunc(e)
+	productFuncLatency.With(prometheus.Labels{
+		"filename": j.FileName(),
+	}).Observe(time.Since(startAt).Seconds())
 }
 
 func NewJob(task *WatchTask, filename string, fileInfo os.FileInfo) *Job {

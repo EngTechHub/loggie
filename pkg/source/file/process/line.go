@@ -4,12 +4,24 @@ import (
 	"bytes"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/loggie-io/loggie/pkg/core/log"
 	"github.com/loggie-io/loggie/pkg/source/file"
 )
 
+var lineProcessorLatency = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    "loggie_debug_reader_line_processor_latency",
+		Help:    "line processor latency in seconds",
+		Buckets: prometheus.ExponentialBuckets(0.001, 4, 10),
+	}, []string{"filename"},
+)
+
 func init() {
 	file.RegisterProcessor(makeLine)
+	prometheus.MustRegister(lineProcessorLatency)
+
 }
 
 func makeLine(config file.ReaderConfig) file.Processor {
@@ -33,6 +45,11 @@ func (lp *LineProcessor) Code() string {
 func (lp *LineProcessor) Process(processorChain file.ProcessChain, ctx *file.JobCollectContext) {
 	job := ctx.Job
 	now := time.Now()
+	defer func() {
+		lineProcessorLatency.With(prometheus.Labels{
+			"filename": ctx.Filename,
+		}).Observe(time.Since(now).Seconds())
+	}()
 	readBuffer := ctx.ReadBuffer
 	read := int64(len(readBuffer))
 	processed := int64(0)
